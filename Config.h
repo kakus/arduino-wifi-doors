@@ -6,7 +6,6 @@
 struct FVariant {
   enum { ENumber, EString } Type;
   union { float F32; byte Str[sizeof(String)]; } Data;
-  //int Type:1;
 
   FVariant(const FVariant& Rhs) {
     this->~FVariant();

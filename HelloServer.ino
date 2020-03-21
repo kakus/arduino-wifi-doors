@@ -33,6 +33,9 @@ public:
     Serial.println();
     if (!SPIFFS.begin()) {
       GLog.Info("Failed to mount SPIFFS");
+    } else {
+      GLog.InitSink<FFileSink>(
+        SPIFFS.open("/log.txt", "w"));
     }
     
     if (auto file = SPIFFS.open("/cfg.txt", "r")) {
