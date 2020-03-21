@@ -1,47 +1,74 @@
 #pragma once
 #include <type_traits>
 
-struct FSerialLogConsumer {
-  void Consume(const char* Msg) {
+struct FSerialSink {
+  void Process(const char* Msg) {
     Serial.println(Msg);
   }
 };
 
-template<typename... TConsumers>
+struct FFileSink {
+  void Init(const File& InFile) { 
+    _File = InFile;
+  }
+  void Process(const char* Msg) {}
+  File _File;
+};
+
+struct FMsgSinkVisitor {
+  template<typename T>
+  void Accept(T& Sink) { Sink.Process(Msg); }
+  char Msg[1024];
+};
+
+template<typename... TSinks>
 class FLoggerImpl {
 public:
-  template<typename... Ts>
-  void Log(const char* Fmt, Ts&&... ts) {
-    char Msg[1024];
-    snprintf(Msg, sizeof(Msg), Fmt, std::forward<Ts>(ts)...);
-    Consume<>(Msg);
-  }
-
-protected:
-  template<int I = 0>
+  template<int I = 0, typename TVisitor>
   inline
-  typename std::enable_if<I < sizeof...(TConsumers)>::type
-  Consume(const char* Msg) {
-      std::get<I>(Consumers).Consume(Msg);
-      Consume<I + 1>(Msg);
+  typename std::enable_if<I < sizeof...(TSinks)>::type
+  Visit(TVisitor& Visitor) {
+      Visitor.Accept(std::get<I>(Sinks));
+      Visit<I + 1>(Visitor);
   }
   template<int I>
   inline
-  typename std::enable_if<I == sizeof...(TConsumers)>::type
-  Consume(const char* Msg) {  }
+  typename std::enable_if<I == sizeof...(TSinks)>::type
+  Visit(...) {  }
+  
+  template<typename... Ts>
+  void Log(const char* Fmt, Ts&&... ts) {
+    FMsgSinkVisitor Visitor;
+    snprintf(Visitor.Msg, sizeof(Visitor.Msg), Fmt, std::forward<Ts>(ts)...);
+    Visit(Visitor);
+  }
 
-  std::tuple<TConsumers...> Consumers;  
+protected:
+  std::tuple<TSinks...> Sinks;  
 };
-
 
 class FLogger {
 public:
+  template<typename TSink, typename TData>
+  void InitSink(const TData& Data) {
+    struct FIniter {
+      void Accept(...) { }
+      void Accept(TSink& Cons) {
+        Cons.Init(Data);
+      }
+      const TData& Data;
+    };
+    FIniter Visitor{Data};
+    Impl.Visit(Visitor);
+  }
+  
   template<typename... Ts>
   inline void Info(const char* Fmt, Ts&&... ts) {
     Impl.Log(Fmt, std::forward<Ts>(ts)...);
   }
+
 protected:
-  FLoggerImpl<FSerialLogConsumer> Impl;
+  FLoggerImpl<FSerialSink, FFileSink> Impl;
 };
 
 extern FLogger GLog;
