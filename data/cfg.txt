@@ -1,0 +1,7 @@
+# this is comment
+cos=innego
+wifi_ssid=Tech_D0048174
+wifi_pswd=UYKHRYJR
+#test
+string = "totek"
+float=4.32
