@@ -29,13 +29,14 @@ class FApp
 {
 public:
   void Setup() {
-    Serial.begin(115200);
-    Serial.println();
+    // Init baud rate
+    GLog.InitSink<FSerialSink>(115200);
+    GLog.Info("");
     if (!SPIFFS.begin()) {
       GLog.Info("Failed to mount SPIFFS");
     } else {
       GLog.InitSink<FFileSink>(
-        SPIFFS.open("/log.txt", "w"));
+        SPIFFS.open("/log.txt", "w+"));
     }
     
     if (auto file = SPIFFS.open("/cfg.txt", "r")) {
@@ -43,7 +44,7 @@ public:
       file.close();
       for (const auto& p : GConfig.Data) {
         GLog.Info("Key = %s, Value = %s, Type = %d", 
-          p.first.c_str(), p.second.AsString().c_str(), p.second.Type);
+          p.first, p.second.AsString(), p.second.Type);
       }
     } else {
       Serial.println("Failed to init config");
