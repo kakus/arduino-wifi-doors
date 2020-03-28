@@ -2,17 +2,30 @@
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#include <FS.h>
 #include <memory>
+#include <Ticker.h>
+#include <WiFiUdp.h>
+#include <NTPClient.h>
 #include "Config.h"
 #include "Logger.h"
+#include "Drivers.h"
 
 #ifndef STASSID
 #define STASSID "Tech_D0048174"
 #define STAPSK  "UYKHRYJR"
 #endif
 
+
+static const char CLogFileName[] PROGMEM = "/log.txt";
+static const char CConfigFileName[] PROGMEM = "/cfg.txt";
+
 FLogger GLog;
 FConfig GConfig;
+fs::FS& GFS = SPIFFS;
+
+WiFiUDP GNtpUDP;
+NTPClient GTimeClient(GNtpUDP, /* utc offset (s) */3600);
 
 class FApp;
 class FAbstractState
@@ -31,28 +44,35 @@ public:
   void Setup() {
     // Init baud rate
     GLog.InitSink<FSerialSink>(115200);
-    GLog.Info("");
-    if (!SPIFFS.begin()) {
-      GLog.Info("Failed to mount SPIFFS");
-    } else {
-      GLog.InitSink<FFileSink>(
-        SPIFFS.open("/log.txt", "w+"));
+    GLog.Info(F(""));
+    if (!GFS.begin()) {
+      GLog.Info(F("Failed to mount GFS (File System)"));
     }
-    
-    if (auto file = SPIFFS.open("/cfg.txt", "r")) {
+    if (auto file = GFS.open(FPSTR(CLogFileName), "w")) {
+      GLog.InitSink<FFileSink>(file);
+    }
+    else {
+      GLog.Info(F("Failed to open log.txt"));
+    }
+
+    if (auto file = GFS.open(FPSTR(CConfigFileName), "r")) {
       GConfig.InitFromFile(file);
-      file.close();
-      for (const auto& p : GConfig.Data) {
-        GLog.Info("Key = %s, Value = %s, Type = %d", 
-          p.first, p.second.AsString(), p.second.Type);
-      }
-    } else {
-      Serial.println("Failed to init config");
     }
-    
+    else {
+      Serial.println(F("Failed to init config"));
+    }
+
     if (State) State->Setup(this);
     bAlreadyStarted = true;
+
+    // Driver list, order matters
+    Drivers.emplace_back(new FAnalogReadDriver());
+
+    for (auto& Driver : Drivers) Driver->Mount();
   }
+
+  template<typename T>
+  T* GetDriver() const;
 
   void Loop() {
     if (State) State->Loop();
@@ -66,6 +86,31 @@ public:
 private:
   bool bAlreadyStarted = false;
   FStatePtr State = nullptr;
+  std::vector<FDriverPtr> Drivers;
+};
+
+template<>
+FAnalogReadDriver* FApp::GetDriver() const { return (FAnalogReadDriver*)Drivers[0].get(); }
+
+FApp GApp;
+
+class FMeasueVcc: public FAbstractState {
+  uint ts = 0;
+  void Setup(FApp*) { }
+  void Loop() {
+    if (millis() - ts < 500) return;
+    ts = millis();
+    
+      auto d = GApp.GetDriver<FAnalogReadDriver>();
+      //auto pp = std::unique_ptr<char>(new char[5000]);
+       GLog.Info(F("%f -> %f, buff: %d"), d->GetAvgOverTime(0.1f), d->GetVoltage(), d->Buffer.size());
+       uint32_t free;
+       uint16_t max;
+       uint8_t frag;
+       ESP.getHeapStats(&free, &max, &frag);
+       GLog.Info(F("%d/%d frag: %d"), free, max, frag);
+  }
+  Ticker t;
 };
 
 class FTryConnectWifi: public FAbstractState
@@ -73,7 +118,7 @@ class FTryConnectWifi: public FAbstractState
 public:
   virtual void Setup(FApp* App) override {
     WiFi.mode(WIFI_AP_STA);
-    WiFi.begin(GConfig[F("wifi_ssid")], GConfig[F("wifi_pswd")]);
+    WiFi.begin();
 
     Serial.println();
     auto b = WiFi.softAP("BalconyAP");
@@ -99,16 +144,16 @@ public:
       Serial.println(WiFi.localIP());
     
       if (MDNS.begin("esp8266")) {
-        Serial.println("MDNS responder started");
+        GLog.Info(F("MDNS responder started"));
       }
       WiFi.mode(WIFI_STA);
       bConnected = true;
+      GApp.ChangeState(new FMeasueVcc());
     }
   }
 
   bool bConnected = false;
 };
-
 
 
 
@@ -125,28 +170,35 @@ const int in2 = 0;
 void handleRoot() {
   digitalWrite(led, 1);
   server.send(200, "text/plain", "hello from esp8266!");
-  WiFi.begin(STASSID, STAPSK);
   digitalWrite(led, 0);
 }
 
-void handleNotFound() {
-  digitalWrite(led, 1);
-  String message = "File Not Found\n\n";
-  message += "URI: ";
-  message += server.uri();
-  message += "\nMethod: ";
-  message += (server.method() == HTTP_GET) ? "GET" : "POST";
-  message += "\nArguments: ";
-  message += server.args();
-  message += "\n";
-  for (uint8_t i = 0; i < server.args(); i++) {
-    message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
+bool handleFileRead(String path) {
+  if (!path.endsWith(F("log.txt")))
+    GLog.Info(F("File request: %s"), path);
+    
+  if (path.endsWith("/")) {
+    path += "index.htm";
   }
-  server.send(404, "text/plain", message);
-  digitalWrite(led, 0);
+  String contentType = String("text/") + (path.endsWith("html") ? "html" : "plain");
+  String pathWithGz = path + ".gz";
+  if (GFS.exists(pathWithGz) || GFS.exists(path)) {
+    if (GFS.exists(pathWithGz)) {
+      path += ".gz";
+    }
+    File file = GFS.open(path, "r");
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.streamFile(file, contentType);
+    file.close();
+    return true;
+  }
+  else {
+    GLog.Info(F("Failed to found requested file"));
+  }
+  return false;
 }
 
-FApp GApp;
+
 void setup(void) {
 
   GApp.Setup();
@@ -157,8 +209,33 @@ void setup(void) {
   server.on("/inline", []() {
     server.send(200, "text/plain", "this works as well");
   });
+
+//  server.on("/A0", [] {
+//    auto d = GApp.GetDriver<FAnalogReadDriver>();
+//    String json = "{\"A0\":[";
+//    for (auto r : d->Buffer) {
+//      json += String(FAnalogReadDriver::ConvertReadToVolts(r), 5);
+//      json += ",";
+//    }
+//    if (json.endsWith(",")) json.remove(json.length()-1,1);
+//    json += "]}";
+//    server.sendHeader("Access-Control-Allow-Origin", "*");
+//    server.send(200, "application/json", json);
+//  });
+  server.on("/A0", [] {
+    auto d = GApp.GetDriver<FAnalogReadDriver>();
+    String json = "{\"A0\":" + String(d->GetVoltage(), 5) + "}";
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", json);
+  });
+
+  server.on("/log", []{
+    File file = GFS.open("/log-live.html", "r");
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    size_t sent = server.streamFile(file, "text/html"); // And send it to the client
+    file.close();                                       // Then close the file again
+  });
   
-  pinMode(12, OUTPUT);
   server.on("/on", []{
     digitalWrite(in1, LOW);
     digitalWrite(in2, HIGH);
@@ -179,7 +256,12 @@ void setup(void) {
     server.send(200, "text/plain", "off");
   });
 
-  server.onNotFound(handleNotFound);
+  server.onNotFound([] {
+    if (!handleFileRead(server.uri())) {
+      server.send(404, "text/plain", "File not found");
+    }
+  });
+  
 
   server.begin();
   Serial.println("HTTP server started");

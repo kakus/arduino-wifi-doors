@@ -1,0 +1,47 @@
+<body>
+    <input type="checkbox" id="cbx-live" name="cbx-live" checked>
+    <label for="cbx-live"> live</label>
+    <input type="checkbox" id="cbx-newestontop" name="cbx-newestontop" checked>
+    <label for="cbx-newestontop"> newest on top</label><br>
+
+    <pre id="log" style="width: 100%; height: 100%;">
+log should be here ....
+    </pre>
+</body>
+<script>
+    let displayElement = document.getElementById(`log`);
+    let cbxLive = document.getElementById(`cbx-live`);
+    let cbxNewestOnTop = document.getElementById(`cbx-newestontop`);
+
+
+    function fetchLog() {
+        fetch('/log.txt')
+        .then(r => {
+            return r.text(); 
+        })
+        .then(t => {
+            let output = [];
+            for (let line of t.split('\n')) {
+                let tokens = line.slice(0, 12).split(":");
+                let time = 0;
+
+                if (tokens.length >= 4) {
+                    let mul = [60 * 60 * 1000, 60 * 1000, 1000, 1];
+                    time = tokens.slice(0, 4).map(parseFloat)
+                    .reduce((p, c, i) => p + c * mul[i], 0);
+                }
+
+                output.push([time, line]);
+            }
+            output.sort((a, b) => cbxNewestOnTop.checked ? b[0] - a[0] : a[0] - b[0]);
+            displayElement.innerText = output.map(x => x[1]).join("\n");
+            if (cbxLive.checked) setTimeout(fetchLog, 100);
+        });
+    };
+    
+    cbxLive.addEventListener("click", e => {
+        if (cbxLive.checked) fetchLog();
+    });
+
+    fetchLog();
+</script>
