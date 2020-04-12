@@ -4,18 +4,11 @@
 #include <ESP8266mDNS.h>
 #include <FS.h>
 #include <memory>
-#include <Ticker.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include "Config.h"
 #include "Logger.h"
 #include "Drivers.h"
-
-#ifndef STASSID
-#define STASSID "Tech_D0048174"
-#define STAPSK  "UYKHRYJR"
-#endif
-
 
 static const char CLogFileName[] PROGMEM = "/log.txt";
 static const char CConfigFileName[] PROGMEM = "/cfg.txt";
@@ -26,22 +19,24 @@ fs::FS& GFS = SPIFFS;
 
 WiFiUDP GNtpUDP;
 NTPClient GTimeClient(GNtpUDP, /* utc offset (s) */3600);
+ESP8266WebServer server{80};
 
-class FApp;
-class FAbstractState
-{
-public:
-  virtual ~FAbstractState() = default;
-  virtual void Setup(FApp* App) = 0;
-  virtual void Loop() { };
-};
-
-using FStatePtr = std::unique_ptr<FAbstractState>;
-
+/**
+ * Entry point for this project, contains all configuration
+ */
 class FApp
 {
 public:
+  
   void Setup() {
+    InitLogAndConfig();
+    InitDrivers();
+    BindDrivers();
+    InitWiFi();
+    InitWebServer();
+  }
+  
+  void InitLogAndConfig() {
     // Init baud rate
     GLog.InitSink<FSerialSink>(115200);
     GLog.Info(F(""));
@@ -59,172 +54,101 @@ public:
       GConfig.InitFromFile(file);
     }
     else {
-      Serial.println(F("Failed to init config"));
+      GLog.Info(F("Failed to init config"));
     }
+  }
 
-    if (State) State->Setup(this);
-    bAlreadyStarted = true;
-
+  void InitDrivers() {
     // Driver list, order matters
     Drivers.emplace_back(new FAnalogReadDriver());
-
+    Drivers.emplace_back(new FThermometerDriver());
+    Drivers.emplace_back(new FIRDriver());
+    Drivers.emplace_back(new FLockDriver());
+    Drivers.emplace_back(new FMotorDriver());
     for (auto& Driver : Drivers) Driver->Mount();
   }
+
+  void BindDrivers();
+
+  void InitWiFi() {
+    String Ssid = GConfig["WiFi.ssid"];
+    String Pswd = GConfig["WiFi.pswd"];
+
+    GLog.Info(F("Trying to connect to Wifi with ssid: %s, pswd: %s"), 
+      Ssid, Pswd);
+      
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(Ssid, Pswd);
+    while (WiFi.status() != WL_CONNECTED) {
+      // WL_IDLE_STATUS      = 0, WL_NO_SSID_AVAIL    = 1, WL_SCAN_COMPLETED   = 2, WL_CONNECTED        = 3,
+      // WL_CONNECT_FAILED   = 4, WL_CONNECTION_LOST  = 5, WL_DISCONNECTED     = 6
+      const char* Status[] = { "IDLE", "NO SSID", "SCAN", "CONNECTED", 
+        "CONN_FAILED", "CONN_LOST", "DISCONNECTED" };
+
+      GLog.Info(F("- Failed to connect: %s"), 
+        Status[constrain(WiFi.status(), 0, 6)]);
+        
+      delay(1000);
+    }
+    
+    GLog.Info(F("Connected to Wifi with address: %s"), 
+      WiFi.localIP().toString());
+
+    String Name = GConfig["MDNS.name"];
+    if (Name.length() > 0 && MDNS.begin(Name)) {
+      GLog.Info(F("MDNS responder started with name: %s"), Name);
+    }
+  }
+
+  void InitWebServer();
 
   template<typename T>
   T* GetDriver() const;
 
   void Loop() {
-    if (State) State->Loop();
-  }
-  
-  void ChangeState(FAbstractState* NewState) {
-    State.reset(NewState);
-    if (bAlreadyStarted) State->Setup(this);
+    server.handleClient();
+    MDNS.update();
   }
   
 private:
-  bool bAlreadyStarted = false;
-  FStatePtr State = nullptr;
+
   std::vector<FDriverPtr> Drivers;
 };
 
 template<>
 FAnalogReadDriver* FApp::GetDriver() const { return (FAnalogReadDriver*)Drivers[0].get(); }
+template<>
+FThermometerDriver* FApp::GetDriver() const { return (FThermometerDriver*)Drivers[1].get(); }
+template<>
+FIRDriver* FApp::GetDriver() const { return (FIRDriver*)Drivers[2].get(); }
+template<>
+FLockDriver* FApp::GetDriver() const { return (FLockDriver*)Drivers[3].get(); }
+template<>
+FMotorDriver* FApp::GetDriver() const { return (FMotorDriver*)Drivers[4].get(); }
 
-FApp GApp;
-
-class FMeasueVcc: public FAbstractState {
-  uint ts = 0;
-  void Setup(FApp*) { }
-  void Loop() {
-    if (millis() - ts < 500) return;
-    ts = millis();
-    
-      auto d = GApp.GetDriver<FAnalogReadDriver>();
-      //auto pp = std::unique_ptr<char>(new char[5000]);
-       GLog.Info(F("%f -> %f, buff: %d"), d->GetAvgOverTime(0.1f), d->GetVoltage(), d->Buffer.size());
-       uint32_t free;
-       uint16_t max;
-       uint8_t frag;
-       ESP.getHeapStats(&free, &max, &frag);
-       GLog.Info(F("%d/%d frag: %d"), free, max, frag);
-  }
-  Ticker t;
-};
-
-class FTryConnectWifi: public FAbstractState
-{
-public:
-  virtual void Setup(FApp* App) override {
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.begin();
-
-    Serial.println();
-    auto b = WiFi.softAP("BalconyAP");
-    Serial.print("softAp: ");
-    Serial.println(b ? "true" : "false");
-
-    
-    // Wait for connection
-    
-  }
-
-  virtual void Loop() override {
-    if (!bConnected) {
-      if (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-        return;
-      }
-      Serial.println("");
-      Serial.print("Connected to ");
-      Serial.println(STASSID);
-      Serial.print("IP address: ");
-      Serial.println(WiFi.localIP());
-    
-      if (MDNS.begin("esp8266")) {
-        GLog.Info(F("MDNS responder started"));
-      }
-      WiFi.mode(WIFI_STA);
-      bConnected = true;
-      GApp.ChangeState(new FMeasueVcc());
-    }
-  }
-
-  bool bConnected = false;
-};
-
-
-
-const char* ssid = STASSID;
-const char* password = STAPSK;
-
-ESP8266WebServer server(80);
-
-const int led = 13;
-const int enA = 5;
-const int in1 = 4;
-const int in2 = 0;
-
-void handleRoot() {
-  digitalWrite(led, 1);
-  server.send(200, "text/plain", "hello from esp8266!");
-  digitalWrite(led, 0);
+void FApp::BindDrivers() {
+    GetDriver<FIRDriver>()->BindAction([this] {
+      auto Motor = GetDriver<FMotorDriver>();
+      Motor->ToggleState();
+    });
 }
 
-bool handleFileRead(String path) {
-  if (!path.endsWith(F("log.txt")))
-    GLog.Info(F("File request: %s"), path);
-    
-  if (path.endsWith("/")) {
-    path += "index.htm";
-  }
-  String contentType = String("text/") + (path.endsWith("html") ? "html" : "plain");
-  String pathWithGz = path + ".gz";
-  if (GFS.exists(pathWithGz) || GFS.exists(path)) {
-    if (GFS.exists(pathWithGz)) {
-      path += ".gz";
-    }
-    File file = GFS.open(path, "r");
+void FApp::InitWebServer() {
+  
+//  server.on("/", [] {
+//    server.send(200, "text/plain", "hello world!");
+//  });
+
+  server.on("/A0", [this] {
+    auto d = GetDriver<FAnalogReadDriver>();
+    String json = "{\"A0\":" + String(d->GetVoltage(), 5) + "}";
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.streamFile(file, contentType);
-    file.close();
-    return true;
-  }
-  else {
-    GLog.Info(F("Failed to found requested file"));
-  }
-  return false;
-}
-
-
-void setup(void) {
-
-  GApp.Setup();
-  GApp.ChangeState(new FTryConnectWifi());
-
-  server.on("/", handleRoot);
-
-  server.on("/inline", []() {
-    server.send(200, "text/plain", "this works as well");
+    server.send(200, "application/json", json);
   });
 
-//  server.on("/A0", [] {
-//    auto d = GApp.GetDriver<FAnalogReadDriver>();
-//    String json = "{\"A0\":[";
-//    for (auto r : d->Buffer) {
-//      json += String(FAnalogReadDriver::ConvertReadToVolts(r), 5);
-//      json += ",";
-//    }
-//    if (json.endsWith(",")) json.remove(json.length()-1,1);
-//    json += "]}";
-//    server.sendHeader("Access-Control-Allow-Origin", "*");
-//    server.send(200, "application/json", json);
-//  });
-  server.on("/A0", [] {
-    auto d = GApp.GetDriver<FAnalogReadDriver>();
-    String json = "{\"A0\":" + String(d->GetVoltage(), 5) + "}";
+  server.on("/C", [this] {
+    auto d = GetDriver<FThermometerDriver>();
+    String json = "{\"C\":" + String(d->GetTemperature(), 3) + "}";
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", json);
   });
@@ -237,27 +161,57 @@ void setup(void) {
   });
   
   server.on("/on", []{
-    digitalWrite(in1, LOW);
-    digitalWrite(in2, HIGH);
-    analogWrite(enA, 1024);
+//      digitalWrite(in1, LOW);
+//      digitalWrite(in2, HIGH);
+//      analogWrite(enA, 1024);
     server.send(200, "text/plain", "on");
   });
   server.on("/stop", []{
-    digitalWrite(in1, LOW);
-    digitalWrite(in2, LOW);
-    analogWrite(enA, 0);
+//      digitalWrite(in1, LOW);
+//      digitalWrite(in2, LOW);
+//      analogWrite(enA, 0);
     server.send(200, "text/plain", "on");
   });
 
   server.on("/off", []{
-    digitalWrite(in1, HIGH);
-    digitalWrite(in2, LOW);
-    analogWrite(enA, 1024);
+//      digitalWrite(in1, HIGH);
+//      digitalWrite(in2, LOW);
+//      analogWrite(enA, 1024);
     server.send(200, "text/plain", "off");
   });
 
+  struct Local {
+    
+    
+    static bool handleFileRead(String path) {
+      if (!path.endsWith(F("log.txt")))
+        GLog.Info(F("File request: %s"), path);
+        
+      if (path.endsWith("/")) {
+        path += "index.htm";
+      }
+      String contentType = String("text/") + (path.endsWith("html") ? "html" : "plain");
+      String pathWithGz = path + ".gz";
+      if (GFS.exists(pathWithGz) || GFS.exists(path)) {
+        if (GFS.exists(pathWithGz)) {
+          path += ".gz";
+        }
+        File file = GFS.open(path, "r");
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.streamFile(file, contentType);
+        file.close();
+        return true;
+      }
+      else {
+        GLog.Info(F("Failed to found requested file"));
+      }
+      return false;
+    }
+
+  };
+  
   server.onNotFound([] {
-    if (!handleFileRead(server.uri())) {
+    if (!Local::handleFileRead(server.uri())) {
       server.send(404, "text/plain", "File not found");
     }
   });
@@ -267,8 +221,11 @@ void setup(void) {
   Serial.println("HTTP server started");
 }
 
+FApp GApp;
+void setup(void) {
+  GApp.Setup();
+}
+
 void loop(void) {
   GApp.Loop();
-  server.handleClient();
-  MDNS.update();
 }

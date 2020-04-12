@@ -90,8 +90,8 @@ public:
   template<typename... Ts>
   void Log(const __FlashStringHelper* Fmt, const Ts&... ts) {
     FMsgSinkVisitor Visitor;
-	Visitor.PrintTimeTag();
-	Visitor.Print(Fmt, ts...);
+	  Visitor.PrintTimeTag();
+	  Visitor.Print(Fmt, ts...);
     Visitor.PrintLn();
     Visit(Visitor);
   }
