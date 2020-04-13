@@ -199,6 +199,12 @@ public:
       break;
     }
   }
+
+  String GetStateAsString() const {
+    return _State == Opening ? F("Opening") :
+           _State == Closing ? F("Closing") :
+           /* else */          F("Stoped");
+  }
   
   void ExecuteCommand(ECommand Command) {
     if (FLockDriver::IsLocked()) {
@@ -249,8 +255,6 @@ protected:
       _MaxWorkTime = 30.f;
       GLog.Info(F("FMotorDriver: Setting Servo.MaxWorkTime to %f"), _MaxWorkTime);
     }
-    
-    pinMode(EPin::D7, INPUT);
   }
   virtual void Update() override final {
     const float Delta = GetConfig().UpdateInterval / _MaxWorkTime;

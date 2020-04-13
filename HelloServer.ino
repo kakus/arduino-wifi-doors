@@ -79,25 +79,7 @@ public:
       
     WiFi.mode(WIFI_STA);
     WiFi.begin(Ssid, Pswd);
-    while (WiFi.status() != WL_CONNECTED) {
-      // WL_IDLE_STATUS      = 0, WL_NO_SSID_AVAIL    = 1, WL_SCAN_COMPLETED   = 2, WL_CONNECTED        = 3,
-      // WL_CONNECT_FAILED   = 4, WL_CONNECTION_LOST  = 5, WL_DISCONNECTED     = 6
-      const char* Status[] = { "IDLE", "NO SSID", "SCAN", "CONNECTED", 
-        "CONN_FAILED", "CONN_LOST", "DISCONNECTED" };
 
-      GLog.Info(F("- Failed to connect: %s"), 
-        Status[constrain(WiFi.status(), 0, 6)]);
-        
-      delay(1000);
-    }
-    
-    GLog.Info(F("Connected to Wifi with address: %s"), 
-      WiFi.localIP().toString());
-
-    String Name = GConfig["MDNS.name"];
-    if (Name.length() > 0 && MDNS.begin(Name)) {
-      GLog.Info(F("MDNS responder started with name: %s"), Name);
-    }
   }
 
   void InitWebServer();
@@ -105,13 +87,48 @@ public:
   template<typename T>
   T* GetDriver() const;
 
+  void CheckWifi() {
+    if (WiFi.status() != WL_CONNECTED) {
+      if (_WifiConnected) {
+        GLog.Info(F("Lost connection to WiFi"));
+      }
+      _WifiConnected = false;
+      
+      if (millis() - _WifiTimer0 > 10000) {
+        _WifiTimer0 = millis();
+        
+        // WL_IDLE_STATUS      = 0, WL_NO_SSID_AVAIL    = 1, WL_SCAN_COMPLETED   = 2, WL_CONNECTED        = 3,
+        // WL_CONNECT_FAILED   = 4, WL_CONNECTION_LOST  = 5, WL_DISCONNECTED     = 6
+        static const char* Status[] = { "IDLE", "NO SSID", "SCAN", "CONNECTED", 
+          "CONN_FAILED", "CONN_LOST", "DISCONNECTED" };
+    
+        GLog.Info(F("- Failed to connect: %s"), 
+          Status[constrain(WiFi.status(), 0, 6)]);
+      }
+   }
+   else if (!_WifiConnected)
+   {
+      GLog.Info(F("Connected to Wifi with address: %s"), 
+        WiFi.localIP().toString());      
+
+      String Name = GConfig["MDNS.name"];
+      if (Name.length() > 0 && MDNS.begin(Name)) {
+        GLog.Info(F("MDNS responder started with name: %s"), Name);
+      }
+      
+      _WifiConnected = true;
+    }
+  }
+
   void Loop() {
+    CheckWifi();
     server.handleClient();
     MDNS.update();
   }
   
 private:
-
+  uint32_t _WifiTimer0 = 0;
+  bool _WifiConnected = false;
   std::vector<FDriverPtr> Drivers;
 };
 
@@ -153,6 +170,26 @@ void FApp::InitWebServer() {
     server.send(200, "application/json", json);
   });
 
+  server.on("/values", [this] {
+    String json = "{\n";
+    {
+      auto d = GetDriver<FThermometerDriver>();
+      json += "\"C\":" + String(d->GetTemperature(), 3) + ",\n";
+    }
+    {
+      auto d = GetDriver<FAnalogReadDriver>();
+      json += "\"A0\":" + String(d->GetVoltage(), 5) + ",\n";
+    }
+    {
+      json += "\"heap\":" + String(ESP.getFreeHeap()) + ",\n";
+      json += "\"uptime\":" + String(millis() / 1000., 3) + ",\n";
+      json += "\"gpio\":" + String((uint32_t)(((GPI | GPO) & 0xFFFF) | ((GP16I & 0x01) << 16))) + "\n";
+    }
+    json += "}";
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", json);
+  });
+
   server.on("/log", []{
     File file = GFS.open("/log-live.html", "r");
     server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -160,29 +197,14 @@ void FApp::InitWebServer() {
     file.close();                                       // Then close the file again
   });
   
-  server.on("/on", []{
-//      digitalWrite(in1, LOW);
-//      digitalWrite(in2, HIGH);
-//      analogWrite(enA, 1024);
-    server.send(200, "text/plain", "on");
-  });
-  server.on("/stop", []{
-//      digitalWrite(in1, LOW);
-//      digitalWrite(in2, LOW);
-//      analogWrite(enA, 0);
-    server.send(200, "text/plain", "on");
+  server.on("/toggle", [this]{
+    auto d = GetDriver<FMotorDriver>();
+    d->ToggleState();
+    server.send(200, "text/plain", d->GetStateAsString());
   });
 
-  server.on("/off", []{
-//      digitalWrite(in1, HIGH);
-//      digitalWrite(in2, LOW);
-//      analogWrite(enA, 1024);
-    server.send(200, "text/plain", "off");
-  });
 
   struct Local {
-    
-    
     static bool handleFileRead(String path) {
       if (!path.endsWith(F("log.txt")))
         GLog.Info(F("File request: %s"), path);
@@ -207,7 +229,6 @@ void FApp::InitWebServer() {
       }
       return false;
     }
-
   };
   
   server.onNotFound([] {
@@ -218,7 +239,7 @@ void FApp::InitWebServer() {
   
 
   server.begin();
-  Serial.println("HTTP server started");
+  GLog.Info(F("HTTP server started"));
 }
 
 FApp GApp;
